@@ -1,48 +1,96 @@
-\# Approach Document - Tri9T Engineering Assignment
+# Approach Document – Tri9T Engineering Assignment
 
+## 1. Document Parsing & Hierarchy Reconstruction
 
+To parse the technical manuals, I selected **PyMuPDF (fitz)** because it provides reliable access to document metadata such as font size, formatting, and page structure, enabling accurate hierarchy reconstruction without relying solely on visual layout.
 
-\## 1. Document Parsing \& Hierarchy Reconstruction
+### Hierarchy Reconstruction Strategy
+- Implemented a **stack-based hierarchy builder** (`current_parents`) to maintain parent-child relationships between document sections.
+- Mapped document structure based on font sizes:
+  - **16.5 pt** → Heading Level 1 (H1)
+  - **12.9 pt** → Heading Level 2 (H2)
+  - **11.0 pt** → Body text
+- Each extracted node is assigned a logical hierarchy before being stored in the database.
 
-I chose \*\*PyMuPDF (fitz)\*\* because it allows for deep inspection of document properties, specifically text size, without relying on unreliable visual layouts.
+### Edge Case Handling
+During development, I identified a formatting inconsistency in **Section 2.1.1.1 (Battery Life)** where the heading used the same font size as regular body text. Relying solely on font size would incorrectly classify it as a paragraph.
 
-\* \*\*Hierarchy Strategy:\*\* I used a stack-based approach (`current\_parents`) tied to font sizes. Level 1 (H1) was mapped to 16.5pt font, Level 2 (H2) to 12.9pt, and body text to 11.0pt. 
+To improve robustness, I introduced a **regular-expression fallback** (`^\d+\.\d+\.\d+`) that detects numbered section patterns, ensuring correct hierarchy reconstruction even when formatting is inconsistent.
 
-\* \*\*Edge Case Handling:\*\* I discovered a structural inconsistency in Section 2.1.1.1 (Battery Life). Its font size (11.0pt) was identical to normal body text, which would mis-parent it. I mitigated this by adding a Regex fallback (`^\\d+\\.\\d+\\.\\d+`) to catch explicit numbering schemes alongside font size checks.
+---
 
+## 2. Versioning & Document Matching Strategy
 
+### Data Model
+The backend uses **SQLite** with **SQLAlchemy ORM** to manage versioned document storage. Every extracted document node is associated with a specific **version_id**, enabling multiple versions of the same manual to coexist.
 
-\## 2. Versioning and Matching Strategy
+### Staleness Detection
+Each document node is assigned a **SHA-256 content hash** generated from its textual content.
 
-\* \*\*Data Model:\*\* I utilized SQLAlchemy with an SQLite backend. Nodes are tied to a `version\_id`. 
+When a new document version is ingested:
 
-\* \*\*Staleness Tracking:\*\* I implemented a `content\_hash` (SHA-256) generated from the text of each node. When Version 2 is ingested, the system links the new node to the old node via a persistent `logical\_node\_id`. If the hashes mismatch, the system immediately flags the traceability as stale. 
+- Nodes are matched using a persistent **logical_node_id**.
+- Content hashes are compared between document versions.
+- If the hashes differ, the corresponding node is automatically marked as **stale**, indicating that previously generated test cases may no longer be valid.
 
+This approach enables efficient change detection without performing expensive text comparisons.
 
+---
 
-\## 3. LLM Strategy
+## 3. LLM Integration Strategy
 
-To handle malformed LLM outputs effectively, I implemented a mocking function during development. In a production environment, this function would wrap the actual API call (e.g., Groq/Gemini) in a strict `try/except` block utilizing Pydantic's structured output validation. If the LLM returns invalid JSON, the system is designed to raise a 502 error rather than saving corrupted data to the JSON store.
+To ensure reliability during development, I implemented a **mock LLM generator** that simulates structured test-case generation.
 
+In a production environment, this component can be replaced with an external LLM provider such as **Gemini** or **Groq**.
 
+To prevent invalid outputs from entering the system:
 
-\## 4. Decision Log
+- LLM responses are validated using **Pydantic schemas**.
+- JSON parsing is wrapped in structured **try/except** blocks.
+- Invalid or malformed responses result in an appropriate API error rather than being stored.
 
+This validation layer protects downstream services from corrupted AI-generated data.
 
+---
 
-\* \*\*What's the one part of this system most likely to silently give wrong results without erroring? How would you catch it?\*\*
+# Decision Log
 
-&#x20; The parser. If a new version introduces a completely novel formatting style (e.g., bolded 11pt text acting as a heading without numbering), it would silently be logged as a standard paragraph. I would catch this by implementing an automated unit test that counts the expected number of H1/H2 nodes against known baseline documents before full database ingestion.
+## 1. What part of the system is most likely to silently produce incorrect results?
 
-&#x20; 
+The **document parser** is the component most susceptible to silent failures.
 
-\* \*\*Where did you choose simplicity over correctness because of time, and what would break first if this went to production as-is?\*\*
+If a future document introduces a new formatting style—for example, an 11 pt bold heading without hierarchical numbering—the parser may incorrectly classify it as body text while still completing successfully.
 
-&#x20; I chose to store the AI-generated test cases in a local JSON file (`test\_cases\_store.json`) rather than deploying a full NoSQL cluster like MongoDB. If this went to production, concurrent write operations from multiple users hitting the generation API simultaneously would cause file-locking errors and data corruption.
+To mitigate this risk, I would implement automated parser validation tests that compare the extracted hierarchy against known baseline documents and verify the expected number of headings before ingestion.
 
+---
 
+## 2. Where did you prioritize simplicity over correctness?
 
-\* \*\*Name one input that you did not handle, and what your system does when it sees it.\*\*
+To reduce implementation complexity within the assignment timeline, I stored generated test cases in a local JSON file (`test_cases_store.json`) instead of using a dedicated NoSQL database such as MongoDB.
 
-&#x20; I did not handle complex table extraction (like the Error Codes table in Section 4.2). Currently, my system reads tables sequentially line-by-line, treating table cells as a mashed-together body paragraph.
+While this solution is sufficient for a single-user prototype, it would not scale well in production.
 
+Potential limitations include:
+
+- Concurrent write conflicts
+- File-locking issues
+- Increased risk of data corruption under multiple simultaneous requests
+
+A production deployment should replace this with a transactional database or document store.
+
+---
+
+## 3. What important input is currently unsupported?
+
+The current implementation does not fully support **complex table extraction**.
+
+Tables—such as the **Error Codes** section—are currently processed as sequential text rather than preserving their row-column relationships.
+
+As a result:
+
+- Table structure is lost.
+- Cell relationships are not maintained.
+- Generated test cases may lack the intended tabular context.
+
+A production-ready solution would incorporate dedicated table extraction techniques or specialized PDF layout analysis libraries to accurately reconstruct structured tables.
